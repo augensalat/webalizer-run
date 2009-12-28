@@ -1,0 +1,85 @@
+=pod
+
+=head1 NAME
+
+webalizer-log - wrapper around tee(1)
+
+=head1 SYNOPSIS
+
+In your Apache configuration file:
+
+  CustomLog "|setuidgid nobody multilog s999999 n20 \
+    '!envdir /var/service/webalizer/env webalizer-log my-website.org' \
+	/var/log/www/my-website.org/access" combined
+
+Apache 2.x seem to have problems with pipe logging to multilog.
+That is one of (many) reasons why I ditched Apache and use lighttpd now.
+With lighttpd the logfile configuration looks like (in one line):
+
+  accesslog.filename = "|/bin/sh -c \"cd /var/log/www/my-website.org && \
+    /sbin/multilog s16777215 n100 \
+	'!/sbin/envdir /etc/webalizer/env webalizer-log my-website.org' \
+	/var/log/www/my-website.org/access\""
+
+  accesslog.format = \
+    "%h %V %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\""
+
+=head1 DESCRIPTION
+
+C<webalizer-log> should be most usefully executed as a C<multilog(8)> processor.
+Input is streamed to C<stdout> and to a file in C<$ENV{INPUTDIR}/new>.
+At the end C<webalizer-log> pulls a trigger by writing to FIFO named
+C<$ENV{TRIGGER}>.
+
+=head1 ARGUMENTS
+
+Exactly one argument is required: An (arbitrary) sitename. This is used in the
+filename of the stored logfiles and later picked up by C<webalizer-run> and fed
+to the C<webalizer(1)>.
+
+=head1 ENVIRONMENT
+
+C<webalizer-log> is configured through environment variables. It is most convenient
+to set them with C<envdir(8)>.
+
+=over 4
+
+=item INPUTDIR
+
+Directory where logfiles are stored. This directory must contain three
+subdirectories: C<cur>, C<new> and C<tmp>.
+
+C<INPUTDIR> and subdirectories must be read- and writeable for the
+webalizer-log process.
+
+Files in C<$ENV{INPUTDIR}/new> must are named like C<`date +'%FT%T'`.$$.site>,
+e.g. C<2005-04-15T12:52:34.4711.my-website.org>.
+
+Defaults to C</var/lib/webalizer/logs>.
+
+=item TRIGGER
+
+Filename of the FIFO.
+
+Defaults to C</var/run/webalizer-run>.
+
+=back
+
+=head1 COPYRIGHT
+
+Copyright 2005 by Bernhard Graf.  This package is free software; you
+can redistribute it and/or modify it under the terms of either the GNU
+Lesser General Public License or the Perl Artistic License.
+
+=head1 AUTHORS
+
+Bernhard Graf E<lt>graf-webalizer-run@movingtarget.deE<gt>
+
+=head1 SEE ALSO
+
+C<webalizer-run(1)>, C<webalizer(1)>, C<nice(1)>, C<multilog(8)>, C<envdir(8)>,
+C<http://cr.yp.to/daemontools.html>, C<http://smarden.org/runit/>
+
+=cut
+
+# vim: set ts=4 sw=4 ai syntax=perl :

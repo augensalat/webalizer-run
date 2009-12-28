@@ -1,0 +1,19 @@
+webalizer-run version 0.01
+==========================
+
+INSTALLATION
+
+To install webalizer-run type the following:
+
+   perl Makefile.PL
+   make
+   make install
+
+COPYRIGHT AND LICENCE
+
+Copyright (C) 2005 by Bernhard Graf <graf-webalizer-run@movingtarget.de>
+
+webalizer-run is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself, either Perl version 5.8.5 or,
+at your option, any later version of Perl 5 you may have available.
+

@@ -1,0 +1,18 @@
+#!/bin/sh -e
+
+site=${1:-unknown}
+date=`date +'%FT%T'`
+trigger=${TRIGGER:-/var/run/webalizer-run}
+inputdir=${INPUTDIR:-/var/lib/webalizer/logs}
+
+# create a random file to save multilog(8) output
+log="$inputdir/tmp/$date.$$.$site"
+
+# split stdin into stdout and $inputdir/tmp/$log
+tee -ai $log
+
+# mv tmp to cur (because mv is an atomic file op)
+mv $log $inputdir/new
+
+# pull the trigger
+echo >$trigger

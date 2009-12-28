@@ -1,0 +1,237 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use Fcntl ':flock';
+use POSIX qw(setuid setgid);
+
+our $VERSION = '0.01';
+
+my $TRIGGER			= $ENV{TRIGGER}			|| '/var/run/webalizer-run';
+my $INPUTDIR		= $ENV{INPUTDIR}		|| '/var/lib/webalizer/logs';
+my $OUTPUTDIR		= $ENV{OUTPUTDIR}		|| '/srv/www/webalizer';
+my $TIMER			= $ENV{TIMER}			|| 0;
+my $NICENESS		= $ENV{NICENESS};
+my $WEBALIZERCONF	= $ENV{WEBALIZERCONF}	|| '/srv/www/webalizer.conf';
+my $UID				= $ENV{UID};
+my $GID				= $ENV{GID};
+
+$TIMER =~ /^\d+$/ or $TIMER = 0;
+undef $NICENESS
+	unless $NICENESS and $NICENESS =~ /^-?\d{1,2}$/o and $NICENESS >=-20 and $NICENESS <= 19;
+ 
+my $buffer;
+my $dir;
+my $file;
+my $site;
+
+local $SIG{ALRM} = 'IGNORE';
+
+unless (-p $TRIGGER) {
+	unlink $TRIGGER;
+	system 'mknod', $TRIGGER, 'p'
+		and die "unable to mknod $TRIGGER: $!";
+	chown $UID || -1, $GID || -1, $TRIGGER
+		or die sprintf "unable to chown %s,%s %s\n", $UID || -1, $GID || -1, $TRIGGER
+			if $UID or $GID;
+	print STDERR "successfully created a FIFO at $TRIGGER\n";
+}
+
+# setgid && setuid
+setgid($GID) or die "unable to setgid($GID): $!\n"
+	if $GID;
+setuid($UID) or die "unable to setuid($UID): $!\n"
+	if $UID;
+
+print STDERR "$0 started. Waiting for data at $TRIGGER\n";
+
+while (1) {
+	eval {
+		local $SIG{ALRM} = \&timer;
+		alarm $TIMER;
+		# next line blocks until there's a reader
+		open FIFO, $TRIGGER or die "unable to read $TRIGGER: $!";
+		read FIFO, $buffer, 1;
+		alarm 0;
+	};
+	close FIFO;
+	print STDERR qq{checking directory "$INPUTDIR/new"\n};
+	while (1) {
+		opendir $dir, "$INPUTDIR/new"
+			or die qq{unable to open directory "$INPUTDIR/new": $!\n};
+		eval {
+			# flock $dir, LOCK_EX;
+			while (defined($file = readdir($dir))) {
+				last if ($site) = $file =~ /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,10}\.(.+)/o;
+			}
+			if (defined $file) {
+				print STDERR qq{found file "$INPUTDIR/new/$file"\n};
+				system 'mv', "$INPUTDIR/new/$file", "$INPUTDIR/cur/$file"
+					and die qq{unable to mv "$INPUTDIR/new/$file" "$INPUTDIR/cur/$file": $!};
+				print STDERR qq{successfully moved "$INPUTDIR/new/$file" to "$INPUTDIR/cur/"\n};
+			}
+		};
+		close $dir;	# also releases LOCK_EX
+		last unless defined $file;
+
+		mkdir "$OUTPUTDIR/$site", 0755
+			or die qq{unable to create outputdir "$OUTPUTDIR/$site": $!\n}
+				unless -d "$OUTPUTDIR/$site";
+		if ($NICENESS) {
+			system 'nice', "-n$NICENESS", 'webalizer', '-p', '-c', $WEBALIZERCONF, '-n', $site, '-o', "$OUTPUTDIR/$site", "$INPUTDIR/cur/$file"
+				and die <<"";
+unable to run 'nice -n$NICENESS webalizer -p -c $WEBALIZERCONF -n "$site" -o "$OUTPUTDIR/$site" "$INPUTDIR/cur/$file"': $!
+
+		}
+		else {
+			system 'webalizer', '-p', '-c', $WEBALIZERCONF, '-n', $site, '-o', "$OUTPUTDIR/$site", "$INPUTDIR/cur/$file"
+				and die <<"";
+unable to run 'webalizer -p -c $WEBALIZERCONF -n "$site" -o "$OUTPUTDIR/$site" "$INPUTDIR/cur/$file"': $!
+
+		}
+		unlink "$INPUTDIR/cur/$file"
+			or die qq{unable to rm "$INPUTDIR/cur/$file": $!\n};
+		print STDERR qq{successfully unlinked file "$INPUTDIR/cur/$file"\n};
+	}
+	print STDERR "---\n";
+}
+
+sub timer { };
+
+=pod
+
+=head1 NAME
+
+webalizer-run - fetch web server logs and feed them to webalizer(1)
+
+=head1 SYNOPSIS
+
+Requires daemontools (http://cr.yp.to/daemontools.html)
+or runit (http://smarden.org/runit/) to be installed and running.
+
+  root> mkdir -p /etc/webalizer/{env,log}
+  root> echo 15 >/etc/webalizer/env/NICENESS
+  root> echo 1800 >/etc/webalizer/env/TIMER
+  root> echo /var/run/webalizer-run >/etc/webalizer/env/TRIGGER
+  root> cat >/etc/webalizer/run
+  #!/bin/sh
+  exec 2>&1
+  exec envdir /etc/webalizer/env envuidgid nobody /usr/local/bin/webalizer-run
+  ^D
+  root> install -d -m 0755 -o nobody -g nobody /var/log/www/webalizer
+  root> cat >/etc/webalizer/log/run
+  #!/bin/sh
+  
+  exec sh -c '
+      cd /var/log/www/webalizer
+      exec setuidgid nobody multilog t .
+  '
+  ^D
+  root> chown -R nobody.nobody /etc/webalizer
+  root> ln -s /etc/webalizer /service/webalizer
+
+In your Apache configuration file:
+
+  CustomLog "|setuidgid nobody multilog s999999 n20 \
+    '!envdir /etc/webalizer/env webalizer-log my-website.org' \
+	/var/log/www/my-website.org/access" combined
+
+Apache 2.x seem to have problems with pipe logging to multilog.
+That is one of (many) reasons why I ditched Apache and use lighttpd now.
+With lighttpd the logfile configuration looks like (in one line):
+
+  accesslog.filename = "|/bin/sh -c \"cd /var/log/www/my-website.org && \
+    /sbin/multilog s16777215 n100 \
+	'!/sbin/envdir /etc/webalizer/env webalizer-log my-website.org' \
+	/var/log/www/my-website.org/access\""
+
+  accesslog.format = \
+    "%h %V %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\""
+
+=head1 DESCRIPTION
+
+C<webalizer-run> must be executed by C<supervise(8)> (or a similar program).
+It waits for web server log files to appear in C<$ENV{INPUTDIR}/new>.
+It periodically checks for new content in C<$ENV{INPUTDIR}/new>, the time
+period can be set with C<$ENV{TIMER}>. Moreover it can be triggerd by
+writing arbitrary data to a FIFO named by C<$ENV{TRIGGER}>, the FIFO is
+created by C<webalizer-run> if it does not exist.
+
+C<webalizer-run> must be started as root so it can C<mknod> a FIFO is
+necessary. It does setgid(2) / setuid(2) to the ids provided by
+C<$ENV{GID}> and C<$ENV{UID}> before it starts any further data
+processing.
+
+=head1 ENVIRONMENT
+
+C<webalizer-run> is configured through environment variables.
+It is most convenient to set them with C<envdir(8)>.
+
+=over 4
+
+=item UID
+
+If set C<webalizer-run> does setuid(C<$ENV{UID}>) in the startup phase.
+
+=item GID
+
+If set C<webalizer-run> does setgid(C<$ENV{GID}>) in the startup phase.
+
+=item WEBALIZERCONF
+
+Configuration file to use with the C<webalizer(1)>.
+
+Defaults to C</srv/www/webalizer.conf>
+
+=item INPUTDIR
+
+Directory to be monitored for logfiles. Must contain three subdirectories:
+C<cur>, C<new> and C<tmp>.
+
+C<INPUTDIR> and subdirectories must be read- and writeable for the webalizer-run process.
+
+Files in C<$ENV{INPUTDIR}/new> must be named like C<`date +'%FT%T'`.$$.$site>, e.g.
+C<2005-04-15T12:52:34.4711.my-website.org>.
+
+Defaults to C</var/lib/webalizer/logs>.
+
+=item OUTPUTDIR
+
+Directory for C<webalizer(1)> output. C<webalizer(1)> will write to a subdirectory
+named like the site name in the input file names (see L<"INPUTDIR">).
+
+C<OUTPUTDIR> and subdirectories must be read- and writeable for the webalizer-run process.
+
+Defaults to C</srv/www/webalizer>.
+
+=item NICENESS
+
+If set and contains a valid value, C<webalizer(1)> is run by C<nice(1)>.
+
+=item TRIGGER
+
+Filename of the FIFO.
+
+Defaults to C</var/run/webalizer-run>.
+
+=back
+
+=head1 COPYRIGHT
+
+Copyright 2005 by Bernhard Graf.  This package is free software; you
+can redistribute it and/or modify it under the terms of either the GNU
+Lesser General Public License or the Perl Artistic License.
+
+=head1 AUTHORS
+
+Bernhard Graf E<lt>graf-webalizer-run@movingtarget.deE<gt>
+
+=head1 SEE ALSO
+
+C<webalizer-log(1)>, C<webalizer(1)>, C<nice(1)>, C<multilog(8)>, C<envdir(8)>,
+C<http://cr.yp.to/daemontools.html>, C<http://smarden.org/runit/>
+
+=cut
+
+# vim: set ts=4 sw=4 ai syntax=perl :
